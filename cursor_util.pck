@@ -52,6 +52,7 @@ create or replace package cursor_util as
   procedure write_as_csv(p_cursor               in out sys_refcursor,
                          p_output_writer        in Writer default get_dbms_output_writer(),
                          p_csv_format           in t_csv_format default csv_format(),
+                         p_headers              in sys.odcivarchar2list default null,
                          p_specific_column_info in t_column_info_tab default no_specific_column_info());
 
   procedure write_as_fixed_width(p_cursor               in out sys_refcursor,
@@ -279,6 +280,7 @@ create or replace package body cursor_util as
   procedure write_as_csv(p_cursor               in out sys_refcursor,
                          p_output_writer        in Writer default get_dbms_output_writer(),
                          p_csv_format           in t_csv_format default csv_format(),
+                         p_headers              in sys.odcivarchar2list default null,
                          p_specific_column_info in t_column_info_tab default no_specific_column_info()) is
     l_cursor           t_dbms_sql_cursor;
     l_column_handlers  t_column_handlers_tab;
@@ -290,6 +292,9 @@ create or replace package body cursor_util as
     l_output_formatter := CSVRecordFormatter(p_output_writer,
                                              p_csv_format.separator,
                                              p_csv_format.enclosing_char);
+    if p_headers is not null then
+      l_output_formatter.write_record(p_headers);
+    end if;
     write_rows(p_output_writer,
                l_cursor,
                l_column_handlers,
