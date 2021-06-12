@@ -224,14 +224,14 @@ create or replace package body dev_plsql_json_pk as
   begin
     --todo consider other numeric types: float, real, etc.
     -- #see sys.standard package NUMBER_BASE
-    return p_fullname in('NUMBER', 'INTEGER');
+    return p_fullname in('number', 'integer');
   end;
 
   function is_date_primitive(p_fullname in varchar2) return boolean is
   begin
     --todo consider other date types: time, time with time zone
     -- #see sys.standard package DATE_BASE 
-    return p_fullname in('DATE', 'TIMESTAMP');
+    return p_fullname in('date', 'timestamp');
   end;
 
   procedure add_primitive_serializer(p_fullname in varchar2,
@@ -274,24 +274,95 @@ create or replace package body dev_plsql_json_pk as
 
   function deserializer_name(p_type_info in t_type_info) return varchar2 is
   begin
-    --todo resolve potential name clash; keep track of already generated names
+    if p_type_info.typecode = c_primitive_code then
+      if is_numeric_primitive(p_type_info.type_name) then
+        return 'num';
+      elsif is_date_primitive(p_type_info.type_name) then
+        return 'dt';
+      else
+        return 'str';
+      end if;
+    end if;
+  
+    --todo resolve potential name clash; e.g. keep track of already generated names  
     return 'to_' || lower(p_type_info.type_name);
   end;
 
+  /*
+    function dt(p_str in varchar2) return date is
+    begin
+      if p_str like '%T%Z' then
+        return to_date(p_str, 'yyyy-mm-dd"T"hh24:mi"Z"');
+      else
+        return to_date(p_str, 'yyyy-mm-dd"T"hh24:mi:ss');
+      end if;
+    end;
+  */
+
   procedure add_primitive_deserializer(p_deserializer_name in varchar2,
+                                       p_value_type        in varchar2,
                                        p_fullname          in varchar2,
                                        p_pkg_src           in out t_pkg_src) is
+    c_hdr constant t_string := '  function <<deserializer_name>>(p_val in <<value_type>>) return <<primitive_type>>';
+    l_hdr t_string;
+  
+    procedure add_varchar2_proc_body(p_pkg_src in out t_pkg_src) is
+    begin
+      add_line(p_pkg_src.bdy, '    return p_val;');
+    end;
+    procedure add_number_proc_body(p_pkg_src in out t_pkg_src) is
+    begin
+      --todo number format
+      add_line(p_pkg_src.bdy, '    return p_val;');
+    end;
+    procedure add_date_proc_body(p_pkg_src in out t_pkg_src) is
+    begin
+      add_line(p_pkg_src.bdy, '    return to_date(p_val, g_date_format);');
+    end;
   begin
-      
+    l_hdr := replace(c_hdr, '<<deserializer_name>>', p_deserializer_name);
+    l_hdr := replace(l_hdr, '<<value_type>>', p_value_type);
+    l_hdr := replace(l_hdr, '<<primitive_type>>', p_fullname);
+  
+    add_line(p_pkg_src.spc, l_hdr || ';');
+    add_line(p_pkg_src.bdy, l_hdr);
+    add_line(p_pkg_src.bdy, '  is');
+    add_line(p_pkg_src.bdy, '  begin');
+  
+    if is_numeric_primitive(p_fullname) then
+      add_number_proc_body(p_pkg_src);
+    elsif is_date_primitive(p_fullname) then
+      add_date_proc_body(p_pkg_src);
+    else
+      add_varchar2_proc_body(p_pkg_src);
+    end if;
+  
+    add_line(p_pkg_src.bdy, '  end');
   end;
 
   procedure add_primitive_proc(p_type_info in t_type_info,
                                p_pkg_src   in out t_pkg_src) is
-    l_fullname t_string;
-  
+    l_fullname     t_string;
+    l_value_type   t_string;
+    l_deserializer t_string;
   begin
     l_fullname := get_fullname(p_type_info);
     add_primitive_serializer(l_fullname, p_pkg_src);
+  
+    if is_numeric_primitive(l_fullname) then
+      l_value_type := 'number';
+    elsif is_date_primitive(l_fullname) then
+      l_value_type := 'varchar2';
+    else
+      l_value_type := 'varchar2';
+    end if;
+  
+    l_deserializer := deserializer_name(p_type_info);
+  
+    add_primitive_deserializer(l_deserializer,
+                               l_value_type,
+                               l_fullname,
+                               p_pkg_src);
   end;
 
   procedure add_procedures(p_type_name       in varchar2,
