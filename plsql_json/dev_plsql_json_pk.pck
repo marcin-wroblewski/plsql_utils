@@ -1,5 +1,9 @@
 create or replace package dev_plsql_json_pk as
-  procedure output_procedures(p_type_name in varchar2);
+  procedure output_procedures(p_type_names in sys.odcivarchar2list,
+                              p_pkg_name   in varchar2 default 'PLSQL_JSON');
+
+  procedure output_procedures(p_type_name in varchar2,
+                              p_pkg_name  in varchar2 default 'PLSQL_JSON');
 end;
 /
 create or replace package body dev_plsql_json_pk as
@@ -38,9 +42,21 @@ create or replace package body dev_plsql_json_pk as
 
   subtype t_string is varchar2(4000);
 
-  type t_pkg_src is record(
-    spc sys.odcivarchar2list := sys.odcivarchar2list(),
+  -- todo reorganize
+  type t_procedure is record(
+    spc t_string,
     bdy sys.odcivarchar2list := sys.odcivarchar2list());
+
+  type t_procedures is table of t_procedure;
+
+  type t_pkg is record(
+    types         sys.odcivarchar2list := sys.odcivarchar2list(),
+    spc_header    sys.odcivarchar2list := sys.odcivarchar2list(),
+    spc_footer    sys.odcivarchar2list := sys.odcivarchar2list(),
+    bdy_header    sys.odcivarchar2list := sys.odcivarchar2list(),
+    bdy_footer    sys.odcivarchar2list := sys.odcivarchar2list(),
+    serializers   t_procedures := t_procedures(),
+    deserializers t_procedures := t_procedures());
 
   type t_type_info is record(
     owner        all_plsql_types.owner%type,
@@ -50,24 +66,32 @@ create or replace package body dev_plsql_json_pk as
 
   type t_processed_types is table of t_type_info index by t_string;
 
-  procedure add_procedures(p_type_name       in varchar2,
-                           p_pkg_src         in out t_pkg_src,
-                           p_processed_types in out t_processed_types);
-
-  procedure add_line(p_lines in out sys.odcivarchar2list,
-                     p_line  in varchar2) is
+  procedure add_procedure(p_procedures in out t_procedures,
+                          p_procedure  in t_procedure) is
     l_index integer;
   begin
-    l_index := p_lines.count() + 1;
-    p_lines.extend();
-    p_lines(l_index) := p_line;
+    l_index := p_procedures.count() + 1;
+  
+    p_procedures.extend();
+    p_procedures(l_index) := p_procedure;
+  end;
+
+  procedure add_procedures(p_type_name       in varchar2,
+                           p_pkg             in out t_pkg,
+                           p_processed_types in out t_processed_types);
+
+  procedure add_str(p_list in out sys.odcivarchar2list, p_str in varchar2) is
+    l_index integer;
+  begin
+    l_index := p_list.count() + 1;
+    p_list.extend();
+    p_list(l_index) := p_str;
   end;
 
   function primitive_base(p_type_name in varchar2) return varchar2 is
   begin
     if lower(p_type_name) in ('number', 'integer') then
       return 'number';
-      --todo timestamp
     elsif lower(p_type_name) in ('timestamp') then
       return 'timestamp';
     elsif lower(p_type_name) in ('date') then
@@ -173,31 +197,27 @@ create or replace package body dev_plsql_json_pk as
 
   procedure add_record_serializer(p_fullname in varchar2,
                                   p_fields   sys.odcivarchar2list,
-                                  p_pkg_src  in out t_pkg_src) is
+                                  p_pkg      in out t_pkg) is
   
-    c_hdr constant t_string := '  function js(p_val in <<record_type>>) return json_object_t';
-    l_hdr t_string;
+    c_hdr            constant t_string := '  function js(p_val in <<record_type>>) return json_object_t';
     c_put_field_stmt constant t_string := '    l_obj.put(''<<field_name>>'', js(p_val.<<field_name>>));';
     l_put_field_stmt t_string;
+    l_procedure      t_procedure;
   begin
-  
-    l_hdr := replace(c_hdr, '<<record_type>>', p_fullname);
-  
-    add_line(p_pkg_src.spc, l_hdr || ';');
-    add_line(p_pkg_src.bdy, l_hdr);
-    add_line(p_pkg_src.bdy, '  is');
-  
-    add_line(p_pkg_src.bdy, '    l_obj json_object_t := json_object_t();');
-    add_line(p_pkg_src.bdy, '  begin');
+    l_procedure.spc := replace(c_hdr, '<<record_type>>', p_fullname);
+    add_str(l_procedure.bdy, '    l_obj json_object_t := json_object_t();');
+    add_str(l_procedure.bdy, '  begin');
   
     for i in 1 .. p_fields.count() loop
       l_put_field_stmt := replace(c_put_field_stmt,
                                   '<<field_name>>',
                                   p_fields(i));
-      add_line(p_pkg_src.bdy, l_put_field_stmt);
+      add_str(l_procedure.bdy, l_put_field_stmt);
     end loop;
-    add_line(p_pkg_src.bdy, '    return l_obj;');
-    add_line(p_pkg_src.bdy, '  end;');
+    add_str(l_procedure.bdy, '    return l_obj;');
+    add_str(l_procedure.bdy, '  end;');
+  
+    add_procedure(p_pkg.serializers, l_procedure);
   end;
 
   function get_getter(p_type_info in t_type_info) return varchar2 is
@@ -242,43 +262,42 @@ create or replace package body dev_plsql_json_pk as
   procedure add_record_deserializer(p_fullname        in varchar2,
                                     p_fields          sys.odcivarchar2list,
                                     p_field_types     sys.odcivarchar2list,
-                                    p_pkg_src         in out t_pkg_src,
+                                    p_pkg             in out t_pkg,
                                     p_processed_types in t_processed_types) is
   
     c_hdr constant t_string := '  function <<deserializer_name>>(p_obj in json_object_t) return <<record_type>>';
     l_hdr               t_string;
     l_get_field_stmt    t_string;
     l_deserializer_name t_string;
+    l_procedure         t_procedure;
   begin
     l_deserializer_name := deserializer_name(p_processed_types(p_fullname));
     l_hdr               := replace(c_hdr, '<<record_type>>', p_fullname);
     l_hdr               := replace(l_hdr,
                                    '<<deserializer_name>>',
                                    l_deserializer_name);
+    l_procedure.spc     := l_hdr;
   
-    add_line(p_pkg_src.spc, l_hdr || ';');
-    add_line(p_pkg_src.bdy, l_hdr);
-    add_line(p_pkg_src.bdy, '  is');
-  
-    add_line(p_pkg_src.bdy,
-             replace('    l_rec <<record_type>>;',
-                     '<<record_type>>',
-                     p_fullname));
-    add_line(p_pkg_src.bdy, '  begin');
+    add_str(l_procedure.bdy,
+            replace('    l_rec <<record_type>>;',
+                    '<<record_type>>',
+                    p_fullname));
+    add_str(l_procedure.bdy, '  begin');
   
     for i in 1 .. p_fields.count() loop
       l_get_field_stmt := generate_get_field_stmt(p_fields(i),
                                                   p_field_types(i),
                                                   p_processed_types);
     
-      add_line(p_pkg_src.bdy, l_get_field_stmt);
+      add_str(l_procedure.bdy, l_get_field_stmt);
     end loop;
-    add_line(p_pkg_src.bdy, '    return l_rec;');
-    add_line(p_pkg_src.bdy, '  end;');
+    add_str(l_procedure.bdy, '    return l_rec;');
+    add_str(l_procedure.bdy, '  end;');
+    add_procedure(p_pkg.deserializers, l_procedure);
   end;
 
   procedure add_record_type_proc(p_type_info       in t_type_info,
-                                 p_pkg_src         in out t_pkg_src,
+                                 p_pkg             in out t_pkg,
                                  p_processed_types in out t_processed_types) is
     l_field_type  t_string;
     l_fields      sys.odcivarchar2list := sys.odcivarchar2list();
@@ -295,47 +314,46 @@ create or replace package body dev_plsql_json_pk as
       l_field_type := get_fullname(r.attr_type_owner,
                                    r.attr_type_package,
                                    r.attr_type_name);
-      add_procedures(l_field_type, p_pkg_src, p_processed_types);
-      add_line(l_fields, lower(r.attr_name));
-      add_line(l_field_types, l_field_type);
+      add_procedures(l_field_type, p_pkg, p_processed_types);
+      add_str(l_fields, lower(r.attr_name));
+      add_str(l_field_types, l_field_type);
     end loop;
   
     l_record_type := get_fullname(p_type_info);
   
-    add_record_serializer(l_record_type, l_fields, p_pkg_src);
+    add_record_serializer(l_record_type, l_fields, p_pkg);
     add_record_deserializer(l_record_type,
                             l_fields,
                             l_field_types,
-                            p_pkg_src,
+                            p_pkg,
                             p_processed_types);
   end;
 
   procedure add_collection_serializer(p_fullname in varchar2,
-                                      p_pkg_src  in out t_pkg_src) is
+                                      p_pkg      in out t_pkg) is
     c_hdr constant t_string := '  function js(p_val in <<collection_type>>) return json_array_t';
-    l_hdr t_string;
+    l_procedure t_procedure;
   begin
-    l_hdr := replace(c_hdr, '<<collection_type>>', p_fullname);
+    l_procedure.spc := replace(c_hdr, '<<collection_type>>', p_fullname);
   
-    add_line(p_pkg_src.spc, l_hdr || ';');
-    add_line(p_pkg_src.bdy, l_hdr);
-    add_line(p_pkg_src.bdy, '  is');
-    add_line(p_pkg_src.bdy, '    l_arr json_array_t := json_array_t();');
-    add_line(p_pkg_src.bdy, '  begin');
-    add_line(p_pkg_src.bdy, '    if p_val is null then');
-    add_line(p_pkg_src.bdy, '      return l_arr;');
-    add_line(p_pkg_src.bdy, '    end if;');
-    add_line(p_pkg_src.bdy, '  ');
-    add_line(p_pkg_src.bdy, '    for i in 1 .. p_val.count() loop');
-    add_line(p_pkg_src.bdy, '      l_arr.append(js(p_val(i)));');
-    add_line(p_pkg_src.bdy, '    end loop;');
-    add_line(p_pkg_src.bdy, '    return l_arr;  ');
-    add_line(p_pkg_src.bdy, '  end;');
+    add_str(l_procedure.bdy, '    l_arr json_array_t := json_array_t();');
+    add_str(l_procedure.bdy, '  begin');
+    add_str(l_procedure.bdy, '    if p_val is null then');
+    add_str(l_procedure.bdy, '      return l_arr;');
+    add_str(l_procedure.bdy, '    end if;');
+    add_str(l_procedure.bdy, '  ');
+    add_str(l_procedure.bdy, '    for i in 1 .. p_val.count() loop');
+    add_str(l_procedure.bdy, '      l_arr.append(js(p_val(i)));');
+    add_str(l_procedure.bdy, '    end loop;');
+    add_str(l_procedure.bdy, '    return l_arr;  ');
+    add_str(l_procedure.bdy, '  end;');
+  
+    add_procedure(p_pkg.serializers, l_procedure);
   end;
 
   procedure add_collection_deserializer(p_fullname        in varchar2,
                                         p_elem_type       in varchar2,
-                                        p_pkg_src         in out t_pkg_src,
+                                        p_pkg             in out t_pkg,
                                         p_processed_types t_processed_types) is
     c_hdr constant t_string := '  function <<deserializer_name>>(p_arr in json_array_t) return <<collection_type>>';
     l_hdr t_string;
@@ -343,38 +361,38 @@ create or replace package body dev_plsql_json_pk as
     l_tab_var           t_string;
     l_elem_deserializer t_string;
     l_deserializer_name t_string;
+    l_procedure         t_procedure;
   begin
     l_deserializer_name := deserializer_name(p_processed_types(p_fullname));
     l_hdr               := replace(c_hdr, '<<collection_type>>', p_fullname);
     l_hdr               := replace(l_hdr,
                                    '<<deserializer_name>>',
                                    l_deserializer_name);
+    l_procedure.spc     := l_hdr;
     l_tab_var           := replace(c_tab_var,
                                    '<<collection_type>>',
                                    p_fullname);
   
-    add_line(p_pkg_src.spc, l_hdr || ';');
-    add_line(p_pkg_src.bdy, l_hdr);
-    add_line(p_pkg_src.bdy, '  is');
-    add_line(p_pkg_src.bdy, l_tab_var);
-    add_line(p_pkg_src.bdy, '  begin');
-    add_line(p_pkg_src.bdy, '    l_tab.extend(p_arr.get_size());');
-    add_line(p_pkg_src.bdy, '    for i in 1 .. p_arr.get_size() loop');
+    add_str(l_procedure.bdy, l_tab_var);
+    add_str(l_procedure.bdy, '  begin');
+    add_str(l_procedure.bdy, '    l_tab.extend(p_arr.get_size());');
+    add_str(l_procedure.bdy, '    for i in 1 .. p_arr.get_size() loop');
   
     l_elem_deserializer := deserializer_name(p_processed_types(p_elem_type));
   
-    add_line(p_pkg_src.bdy,
-             replace('      l_tab(i) := <<elem_deserializer_name>>(json_object_t(p_arr.get(i-1)));',
-                     '<<elem_deserializer_name>>',
-                     l_elem_deserializer));
+    add_str(l_procedure.bdy,
+            replace('      l_tab(i) := <<elem_deserializer_name>>(json_object_t(p_arr.get(i-1)));',
+                    '<<elem_deserializer_name>>',
+                    l_elem_deserializer));
   
-    add_line(p_pkg_src.bdy, '    end loop;');
-    add_line(p_pkg_src.bdy, '    return l_tab;');
-    add_line(p_pkg_src.bdy, '  end;');
+    add_str(l_procedure.bdy, '    end loop;');
+    add_str(l_procedure.bdy, '    return l_tab;');
+    add_str(l_procedure.bdy, '  end;');
+    add_procedure(p_pkg.deserializers, l_procedure);
   end;
 
   procedure add_coll_type_proc(p_type_info       in t_type_info,
-                               p_pkg_src         in out t_pkg_src,
+                               p_pkg             in out t_pkg,
                                p_processed_types in out t_processed_types) is
     l_coll_info all_plsql_coll_types%rowtype;
     l_elem_type t_string;
@@ -395,120 +413,110 @@ create or replace package body dev_plsql_json_pk as
     l_elem_type := get_fullname(l_coll_info.elem_type_owner,
                                 l_coll_info.elem_type_package,
                                 l_coll_info.elem_type_name);
-    add_procedures(l_elem_type, p_pkg_src, p_processed_types);
+    add_procedures(l_elem_type, p_pkg, p_processed_types);
   
-    add_collection_serializer(l_coll_type, p_pkg_src);
+    add_collection_serializer(l_coll_type, p_pkg);
   
     l_deserializer_name := deserializer_name(p_type_info);
     add_collection_deserializer(l_coll_type,
                                 l_elem_type,
-                                p_pkg_src,
+                                p_pkg,
                                 p_processed_types);
   end;
 
   procedure add_primitive_serializer(p_fullname in varchar2,
-                                     p_pkg_src  in out t_pkg_src) is
+                                     p_pkg      in out t_pkg) is
     c_js_primitive_header constant t_string := '  function js(p_val in <<primitive_type>>) return varchar2';
-    l_hdr t_string;
+    l_hdr       t_string;
+    l_procedure t_procedure;
   
-    procedure add_varchar2_js_proc_body(p_pkg_src in out t_pkg_src) is
+    procedure add_varchar2_js_proc_body is
     begin
-      add_line(p_pkg_src.bdy, '    return p_val;');
+      add_str(l_procedure.bdy, '    return p_val;');
     end;
-    procedure add_number_js_proc_body(p_pkg_src in out t_pkg_src) is
+    procedure add_number_js_proc_body is
     begin
       --todo number format
-      add_line(p_pkg_src.bdy, '    return p_val;');
+      add_str(l_procedure.bdy, '    return p_val;');
     end;
-    procedure add_date_js_proc_body(p_pkg_src in out t_pkg_src) is
+    procedure add_date_js_proc_body is
     begin
-      add_line(p_pkg_src.bdy, '    return to_char(p_val, g_date_format);');
+      add_str(l_procedure.bdy, '    return to_char(p_val, g_date_format);');
     end;
   
   begin
-    l_hdr := replace(c_js_primitive_header,
-                     '<<primitive_type>>',
-                     p_fullname);
-    add_line(p_pkg_src.spc, l_hdr || ';');
-    add_line(p_pkg_src.bdy, l_hdr);
-    add_line(p_pkg_src.bdy, '  is');
-    add_line(p_pkg_src.bdy, '  begin');
+    l_procedure.spc := replace(c_js_primitive_header,
+                               '<<primitive_type>>',
+                               p_fullname);
+  
+    add_str(l_procedure.bdy, '  begin');
   
     if is_numeric_primitive(p_fullname) then
-      add_number_js_proc_body(p_pkg_src);
+      add_number_js_proc_body();
     elsif is_date_primitive(p_fullname) then
-      add_date_js_proc_body(p_pkg_src);
+      add_date_js_proc_body();
     elsif is_timestamp_primitive(p_fullname) then
-      add_date_js_proc_body(p_pkg_src);
+      add_date_js_proc_body();
     else
-      add_varchar2_js_proc_body(p_pkg_src);
+      add_varchar2_js_proc_body();
     end if;
   
-    add_line(p_pkg_src.bdy, '  end;');
+    add_str(l_procedure.bdy, '  end;');
+    add_procedure(p_pkg.serializers, l_procedure);
   end;
-
-  /*
-    function dt(p_str in varchar2) return date is
-    begin
-      if p_str like '%T%Z' then
-        return to_date(p_str, 'yyyy-mm-dd"T"hh24:mi"Z"');
-      else
-        return to_date(p_str, 'yyyy-mm-dd"T"hh24:mi:ss');
-      end if;
-    end;
-  */
 
   procedure add_primitive_deserializer(p_deserializer_name in varchar2,
                                        p_value_type        in varchar2,
                                        p_fullname          in varchar2,
-                                       p_pkg_src           in out t_pkg_src) is
+                                       p_pkg               in out t_pkg) is
     c_hdr constant t_string := '  function <<deserializer_name>>(p_val in <<value_type>>) return <<primitive_type>>';
-    l_hdr t_string;
+    l_hdr       t_string;
+    l_procedure t_procedure;
   
-    procedure add_varchar2_proc_body(p_pkg_src in out t_pkg_src) is
+    procedure add_varchar2_proc_body is
     begin
-      add_line(p_pkg_src.bdy, '    return p_val;');
+      add_str(l_procedure.bdy, '    return p_val;');
     end;
-    procedure add_number_proc_body(p_pkg_src in out t_pkg_src) is
+    procedure add_number_proc_body is
     begin
       --todo number format
-      add_line(p_pkg_src.bdy, '    return p_val;');
+      add_str(l_procedure.bdy, '    return p_val;');
     end;
-    procedure add_date_proc_body(p_pkg_src in out t_pkg_src) is
+    procedure add_date_proc_body is
     begin
-      add_line(p_pkg_src.bdy, '    return to_date(p_val, g_date_format);');
+      add_str(l_procedure.bdy, '    return to_date(p_val, g_date_format);');
     end;
   begin
     l_hdr := replace(c_hdr, '<<deserializer_name>>', p_deserializer_name);
     l_hdr := replace(l_hdr, '<<value_type>>', p_value_type);
     l_hdr := replace(l_hdr, '<<primitive_type>>', p_fullname);
   
-    add_line(p_pkg_src.spc, l_hdr || ';');
-    add_line(p_pkg_src.bdy, l_hdr);
-    add_line(p_pkg_src.bdy, '  is');
-    add_line(p_pkg_src.bdy, '  begin');
+    l_procedure.spc := l_hdr;
+    add_str(l_procedure.bdy, '  begin');
   
     if is_numeric_primitive(p_fullname) then
-      add_number_proc_body(p_pkg_src);
+      add_number_proc_body();
     elsif is_date_primitive(p_fullname) then
-      add_date_proc_body(p_pkg_src);
+      add_date_proc_body();
     elsif is_timestamp_primitive(p_fullname) then
-      add_date_proc_body(p_pkg_src);
+      add_date_proc_body();
     else
-      add_varchar2_proc_body(p_pkg_src);
+      add_varchar2_proc_body();
     end if;
   
-    add_line(p_pkg_src.bdy, '  end;');
+    add_str(l_procedure.bdy, '  end;');
+  
+    add_procedure(p_pkg.deserializers, l_procedure);
   end;
 
   procedure add_primitive_proc(p_type_info in t_type_info,
-                               p_pkg_src   in out t_pkg_src) is
+                               p_pkg       in out t_pkg) is
     l_fullname     t_string;
     l_value_type   t_string;
     l_deserializer t_string;
   begin
     l_fullname := get_fullname(p_type_info);
-    add_primitive_serializer(l_fullname, p_pkg_src);
+    add_primitive_serializer(l_fullname, p_pkg);
   
     if is_numeric_primitive(l_fullname) then
       l_value_type := 'number';
@@ -523,11 +531,11 @@ create or replace package body dev_plsql_json_pk as
     add_primitive_deserializer(l_deserializer,
                                l_value_type,
                                l_fullname,
-                               p_pkg_src);
+                               p_pkg);
   end;
 
   procedure add_procedures(p_type_name       in varchar2,
-                           p_pkg_src         in out t_pkg_src,
+                           p_pkg             in out t_pkg,
                            p_processed_types in out t_processed_types) is
     l_type_info t_type_info := get_type_info(p_type_name);
     l_fullname  t_string;
@@ -535,72 +543,131 @@ create or replace package body dev_plsql_json_pk as
     l_fullname := get_fullname(l_type_info);
     if p_processed_types.exists(l_fullname) then
       return;
-    elsif l_type_info.typecode = c_primitive_code and
-          p_processed_types.exists(primitive_base(l_fullname)) then
-      p_processed_types(l_fullname) := p_processed_types(primitive_base(l_fullname));
-      return;
     else
-      p_processed_types(l_fullname) := l_type_info;
+      add_str(p_pkg.types, l_fullname);
+      if l_type_info.typecode = c_primitive_code and
+         p_processed_types.exists(primitive_base(l_fullname)) then
+        p_processed_types(l_fullname) := p_processed_types(primitive_base(l_fullname));
+        return;
+      else
+        p_processed_types(l_fullname) := l_type_info;
+      end if;
     end if;
   
     if l_type_info.typecode = c_record_code then
-      add_record_type_proc(l_type_info, p_pkg_src, p_processed_types);
+      add_record_type_proc(l_type_info, p_pkg, p_processed_types);
     elsif l_type_info.typecode = c_collection_code then
-      add_coll_type_proc(l_type_info, p_pkg_src, p_processed_types);
+      add_coll_type_proc(l_type_info, p_pkg, p_processed_types);
     elsif l_type_info.typecode = c_primitive_code then
-      add_primitive_proc(l_type_info, p_pkg_src);
+      add_primitive_proc(l_type_info, p_pkg);
     end if;
-    add_line(p_pkg_src.bdy, '');
   end;
 
-  procedure init_pkg(p_pkg_src         in out t_pkg_src,
+  procedure init_pkg(p_pkg             in out t_pkg,
                      p_pkg_name        in varchar2,
                      p_processed_types in out t_processed_types) is
   begin
-    add_line(p_pkg_src.spc,
-             'create or replace package ' || p_pkg_name || ' as');
-    add_line(p_pkg_src.bdy,
-             'create or replace package body ' || p_pkg_name || ' as');
-    add_line(p_pkg_src.bdy,
-             '  g_date_format varchar2(30) := ''yyyy-mm-dd"T"hh24:mi:ss'';');
+    add_str(p_pkg.spc_header,
+            'create or replace package ' || p_pkg_name || ' as');
+    add_str(p_pkg.bdy_header,
+            'create or replace package body ' || p_pkg_name || ' as');
+    add_str(p_pkg.bdy_header,
+            '  g_date_format varchar2(30) := ''yyyy-mm-dd"T"hh24:mi:ss'';');
   
-    add_procedures('TIMESTAMP', p_pkg_src, p_processed_types);
-    add_procedures('DATE', p_pkg_src, p_processed_types);
-    add_procedures('NUMBER', p_pkg_src, p_processed_types);
-    add_procedures('VARCHAR2', p_pkg_src, p_processed_types);
+    add_procedures('TIMESTAMP', p_pkg, p_processed_types);
+    add_procedures('DATE', p_pkg, p_processed_types);
+    add_procedures('NUMBER', p_pkg, p_processed_types);
+    add_procedures('VARCHAR2', p_pkg, p_processed_types);
   end;
 
-  procedure finalize_pkg(p_pkg_src  in out t_pkg_src,
-                         p_pkg_name in varchar2) is
+  procedure finalize_pkg(p_pkg in out t_pkg, p_pkg_name in varchar2) is
   begin
-    add_line(p_pkg_src.spc, 'end;');
-    add_line(p_pkg_src.bdy, 'end;');
+    add_str(p_pkg.spc_footer, 'end;');
+    add_str(p_pkg.bdy_footer, 'end;');
   end;
 
-  function generate_pkg(p_type_name in varchar2,
-                        p_pkg_name  in varchar2 default 'PLSQL_JSON')
-    return t_pkg_src is
-    l_pkg_src         t_pkg_src;
+  function generate_pkg(p_type_names in sys.odcivarchar2list,
+                        p_pkg_name   in varchar2) return t_pkg is
+    l_pkg             t_pkg;
     l_processed_types t_processed_types;
   begin
-    init_pkg(l_pkg_src, p_pkg_name, l_processed_types);
-    add_procedures(p_type_name, l_pkg_src, l_processed_types);
-    finalize_pkg(l_pkg_src, p_pkg_name);
-    return l_pkg_src;
+    init_pkg(l_pkg, p_pkg_name, l_processed_types);
+    for i in 1 .. p_type_names.count() loop
+      add_procedures(p_type_names(i), l_pkg, l_processed_types);
+    end loop;
+    finalize_pkg(l_pkg, p_pkg_name);
+    return l_pkg;
   end;
 
-  procedure output_procedures(p_type_name in varchar2) is
-    l_pkg_src t_pkg_src;
+  procedure println(p_text in varchar2) is
   begin
-    l_pkg_src := generate_pkg(p_type_name);
-    for i in 1 .. l_pkg_src.spc.count() loop
-      dbms_output.put_line(l_pkg_src.spc(i));
+    dbms_output.put_line(p_text);
+  end;
+
+  procedure output_proc_spec(p_procedure in t_procedure) is
+  begin
+    println(p_procedure.spc || ';');
+  end;
+
+  procedure output_proc_bdy(p_procedure in t_procedure) is
+  begin
+    println(p_procedure.spc);
+    println('  is');
+    for i in 1 .. p_procedure.bdy.count() loop
+      println(p_procedure.bdy(i));
     end loop;
-    dbms_output.put_line('/');
-    for i in 1 .. l_pkg_src.bdy.count() loop
-      dbms_output.put_line(l_pkg_src.bdy(i));
+  end;
+
+  procedure output_spc(p_pkg in t_pkg) is
+  begin
+    for i in 1 .. p_pkg.spc_header.count() loop
+      println(p_pkg.spc_header(i));
     end loop;
-    dbms_output.put_line('/');
+    for i in 1 .. p_pkg.types.count() loop
+      println('  --supported type:{' || p_pkg.types(i) || '}');
+    end loop;
+    for i in 1 .. p_pkg.serializers.count() loop
+      output_proc_spec(p_pkg.serializers(i));
+    end loop;
+    for i in 1 .. p_pkg.deserializers.count() loop
+      output_proc_spec(p_pkg.deserializers(i));
+    end loop;
+    for i in 1 .. p_pkg.spc_footer.count() loop
+      println(p_pkg.spc_footer(i));
+    end loop;
+    println('/');
+  end;
+
+  procedure output_bdy(p_pkg in t_pkg) is
+  begin
+    for i in 1 .. p_pkg.bdy_header.count() loop
+      println(p_pkg.bdy_header(i));
+    end loop;
+    for i in 1 .. p_pkg.serializers.count() loop
+      output_proc_bdy(p_pkg.serializers(i));
+    end loop;
+    for i in 1 .. p_pkg.deserializers.count() loop
+      output_proc_bdy(p_pkg.deserializers(i));
+    end loop;
+    for i in 1 .. p_pkg.bdy_footer.count() loop
+      println(p_pkg.bdy_footer(i));
+    end loop;
+    println('/');
+  end;
+
+  procedure output_procedures(p_type_names in sys.odcivarchar2list,
+                              p_pkg_name   in varchar2 default 'PLSQL_JSON') is
+    l_pkg t_pkg;
+  begin
+    l_pkg := generate_pkg(p_type_names, p_pkg_name);
+    output_spc(l_pkg);
+    output_bdy(l_pkg);
+  end;
+
+  procedure output_procedures(p_type_name in varchar2,
+                              p_pkg_name  in varchar2 default 'PLSQL_JSON') is
+  begin
+    output_procedures(sys.odcivarchar2list(p_type_name), p_pkg_name);
   end;
 end;
 /
