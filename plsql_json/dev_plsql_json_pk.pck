@@ -68,7 +68,9 @@ create or replace package body dev_plsql_json_pk as
     if lower(p_type_name) in ('number', 'integer') then
       return 'number';
       --todo timestamp
-    elsif lower(p_type_name) in ('date', 'timestamp') then
+    elsif lower(p_type_name) in ('timestamp') then
+      return 'timestamp';
+    elsif lower(p_type_name) in ('date') then
       return 'date';
     else
       return 'varchar2';
@@ -89,6 +91,13 @@ create or replace package body dev_plsql_json_pk as
     return primitive_base(p_fullname) = 'date';
   end;
 
+  function is_timestamp_primitive(p_fullname in varchar2) return boolean is
+  begin
+    --todo consider other date types: time, time with time zone
+    -- #see sys.standard package DATE_BASE 
+    return primitive_base(p_fullname) = 'timestamp';
+  end;
+
   function deserializer_name(p_type_info in t_type_info) return varchar2 is
   begin
     if p_type_info.typecode = c_primitive_code then
@@ -96,6 +105,8 @@ create or replace package body dev_plsql_json_pk as
         return 'num';
       elsif is_date_primitive(p_type_info.type_name) then
         return 'dt';
+      elsif is_timestamp_primitive(p_type_info.type_name) then
+        return 'ts';
       else
         return 'str';
       end if;
@@ -413,6 +424,7 @@ create or replace package body dev_plsql_json_pk as
     begin
       add_line(p_pkg_src.bdy, '    return to_char(p_val, g_date_format);');
     end;
+  
   begin
     l_hdr := replace(c_js_primitive_header,
                      '<<primitive_type>>',
@@ -425,6 +437,8 @@ create or replace package body dev_plsql_json_pk as
     if is_numeric_primitive(p_fullname) then
       add_number_js_proc_body(p_pkg_src);
     elsif is_date_primitive(p_fullname) then
+      add_date_js_proc_body(p_pkg_src);
+    elsif is_timestamp_primitive(p_fullname) then
       add_date_js_proc_body(p_pkg_src);
     else
       add_varchar2_js_proc_body(p_pkg_src);
@@ -477,6 +491,8 @@ create or replace package body dev_plsql_json_pk as
     if is_numeric_primitive(p_fullname) then
       add_number_proc_body(p_pkg_src);
     elsif is_date_primitive(p_fullname) then
+      add_date_proc_body(p_pkg_src);
+    elsif is_timestamp_primitive(p_fullname) then
       add_date_proc_body(p_pkg_src);
     else
       add_varchar2_proc_body(p_pkg_src);
@@ -548,6 +564,7 @@ create or replace package body dev_plsql_json_pk as
     add_line(p_pkg_src.bdy,
              '  g_date_format varchar2(30) := ''yyyy-mm-dd"T"hh24:mi:ss'';');
   
+    add_procedures('TIMESTAMP', p_pkg_src, p_processed_types);
     add_procedures('DATE', p_pkg_src, p_processed_types);
     add_procedures('NUMBER', p_pkg_src, p_processed_types);
     add_procedures('VARCHAR2', p_pkg_src, p_processed_types);
