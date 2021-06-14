@@ -7,6 +7,9 @@ create or replace package dev_plsql_json_pk as
 end;
 /
 create or replace package body dev_plsql_json_pk as
+
+  --TODO: index by table
+
   /*
   <<js_for_record_type>> ::=
   function js(p_val in <<record_type>>) return json_object_t is
@@ -90,7 +93,9 @@ create or replace package body dev_plsql_json_pk as
 
   function primitive_base(p_type_name in varchar2) return varchar2 is
   begin
-    if lower(p_type_name) in ('number', 'integer') then
+    if lower(p_type_name) in ('pl/sql boolean', 'boolean') then
+      return 'boolean';
+    elsif lower(p_type_name) in ('number', 'integer') then
       return 'number';
     elsif lower(p_type_name) in ('timestamp') then
       return 'timestamp';
@@ -99,6 +104,11 @@ create or replace package body dev_plsql_json_pk as
     else
       return 'varchar2';
     end if;
+  end;
+
+  function is_boolean_primitive(p_fullname in varchar2) return boolean is
+  begin
+    return primitive_base(p_fullname) = 'boolean';
   end;
 
   function is_numeric_primitive(p_fullname in varchar2) return boolean is
@@ -125,7 +135,10 @@ create or replace package body dev_plsql_json_pk as
   function deserializer_name(p_type_info in t_type_info) return varchar2 is
   begin
     if p_type_info.typecode = c_primitive_code then
-      if is_numeric_primitive(p_type_info.type_name) then
+      --to much of those ifs. use index by table 
+      if is_boolean_primitive(p_type_info.type_name) then
+        return 'bool';
+      elsif is_numeric_primitive(p_type_info.type_name) then
         return 'num';
       elsif is_date_primitive(p_type_info.type_name) then
         return 'dt';
@@ -147,6 +160,9 @@ create or replace package body dev_plsql_json_pk as
     -- simply converting to lowercase names here, because it's my personal preference
     -- but it would be safer to use dbms_utility.canonicalize 
     if p_owner is null and p_package_name is null then
+      if lower(p_type_name) = 'pl/sql boolean' then
+        return 'boolean';
+      end if;
       return lower(p_type_name);
     elsif nvl(p_owner, user) = user then
       return lower(p_package_name || '.' || p_type_name);
@@ -223,7 +239,9 @@ create or replace package body dev_plsql_json_pk as
   function get_getter(p_type_info in t_type_info) return varchar2 is
   begin
     if p_type_info.typecode = c_primitive_code then
-      if is_numeric_primitive(p_type_info.type_name) then
+      if is_boolean_primitive(p_type_info.type_name) then
+        return 'get_Boolean';
+      elsif is_numeric_primitive(p_type_info.type_name) then
         return 'get_Number';
       else
         return 'get_String';
@@ -359,10 +377,56 @@ create or replace package body dev_plsql_json_pk as
     l_hdr t_string;
     c_tab_var constant t_string := '    l_tab <<collection_type>> := <<collection_type>>();';
     l_tab_var           t_string;
-    l_elem_deserializer t_string;
     l_deserializer_name t_string;
     l_procedure         t_procedure;
+  
+    /*    function get_primitive_elem_get_stmt(p_type_info t_type_info) return varchar2 is
+    l_elem_deserializer t_string;
+    l_getter t_string;
+    l_stmt              t_string := '      l_tab(i) := <<elem_deserializer_name>>(p_arr.<<getter>>(i-1)));';
+    begin
+      l_elem_deserializer := deserializer_name(p_type_info);
+      l_getter
+      end;*/
+  
+    function get_primitiv_elem_retrieval(p_type_info t_type_info)
+      return varchar2 is
+      l_getter t_string;
+    begin
+      l_getter := get_getter(p_type_info);
+      return replace('p_arr.<<getter>>(i-1)', '<<getter>>', l_getter);
+    end;
+    function get_elem_retrieval_stmt(p_type_info t_type_info) return varchar2 is
+    
+    begin
+      if p_type_info.typecode = c_primitive_code then
+        return get_primitiv_elem_retrieval(p_type_info);
+      elsif p_type_info.typecode = c_collection_code then
+        return 'json_array_t(p_arr.get(i-1))';
+      elsif p_type_info.typecode = c_record_code then
+        return 'json_object_t(p_arr.get(i-1))';
+      end if;
+    end;
+  
+    function get_elem_get_stmt return varchar2 is
+      l_elem_deserializer t_string;
+      l_retrieval         t_string;
+      l_type_info         t_type_info;
+      l_stmt              t_string := '      l_tab(i) := <<elem_deserializer_name>>(<<elem_retrieval>>);';
+    begin
+      l_type_info         := p_processed_types(p_elem_type);
+      l_elem_deserializer := deserializer_name(l_type_info);
+      l_retrieval         := get_elem_retrieval_stmt(l_type_info);
+      l_stmt              := replace(l_stmt,
+                                     '<<elem_deserializer_name>>',
+                                     l_elem_deserializer);
+      l_stmt              := replace(l_stmt,
+                                     '<<elem_retrieval>>',
+                                     l_retrieval);
+      return l_stmt;
+    end;
   begin
+  
     l_deserializer_name := deserializer_name(p_processed_types(p_fullname));
     l_hdr               := replace(c_hdr, '<<collection_type>>', p_fullname);
     l_hdr               := replace(l_hdr,
@@ -381,12 +445,7 @@ create or replace package body dev_plsql_json_pk as
     add_str(l_procedure.bdy, '    l_tab.extend(p_arr.get_size());');
     add_str(l_procedure.bdy, '    for i in 1 .. p_arr.get_size() loop');
   
-    l_elem_deserializer := deserializer_name(p_processed_types(p_elem_type));
-  
-    add_str(l_procedure.bdy,
-            replace('      l_tab(i) := <<elem_deserializer_name>>(json_object_t(p_arr.get(i-1)));',
-                    '<<elem_deserializer_name>>',
-                    l_elem_deserializer));
+    add_str(l_procedure.bdy, get_elem_get_stmt());
   
     add_str(l_procedure.bdy, '    end loop;');
     add_str(l_procedure.bdy, '    return l_tab;');
@@ -429,10 +488,15 @@ create or replace package body dev_plsql_json_pk as
 
   procedure add_primitive_serializer(p_fullname in varchar2,
                                      p_pkg      in out t_pkg) is
-    c_js_primitive_header constant t_string := '  function js(p_val in <<primitive_type>>) return varchar2';
-    l_hdr       t_string;
-    l_procedure t_procedure;
+    c_js_primitive_header constant t_string := '  function js(p_val in <<primitive_type>>) return <<return_type>>';
+    l_hdr         t_string;
+    l_procedure   t_procedure;
+    l_return_type t_string;
   
+    procedure add_bool_js_proc_body is
+    begin
+      add_str(l_procedure.bdy, '    return p_val;');
+    end;
     procedure add_varchar2_js_proc_body is
     begin
       add_str(l_procedure.bdy, '    return p_val;');
@@ -448,13 +512,23 @@ create or replace package body dev_plsql_json_pk as
     end;
   
   begin
+    l_return_type := p_fullname;
+    if is_date_primitive(l_return_type) or
+       is_timestamp_primitive(l_return_type) then
+      l_return_type := 'varchar2';
+    end if;
     l_procedure.spc := replace(c_js_primitive_header,
                                '<<primitive_type>>',
                                p_fullname);
+    l_procedure.spc := replace(l_procedure.spc,
+                               '<<return_type>>',
+                               l_return_type);
   
     add_str(l_procedure.bdy, '  begin');
   
-    if is_numeric_primitive(p_fullname) then
+    if is_boolean_primitive(p_fullname) then
+      add_bool_js_proc_body();
+    elsif is_numeric_primitive(p_fullname) then
       add_number_js_proc_body();
     elsif is_date_primitive(p_fullname) then
       add_date_js_proc_body();
@@ -476,6 +550,10 @@ create or replace package body dev_plsql_json_pk as
     l_hdr       t_string;
     l_procedure t_procedure;
   
+    procedure add_boolean_proc_body is
+    begin
+      add_str(l_procedure.bdy, '    return p_val;');
+    end;
     procedure add_varchar2_proc_body is
     begin
       add_str(l_procedure.bdy, '    return p_val;');
@@ -497,7 +575,9 @@ create or replace package body dev_plsql_json_pk as
     l_procedure.spc := l_hdr;
     add_str(l_procedure.bdy, '  begin');
   
-    if is_numeric_primitive(p_fullname) then
+    if is_boolean_primitive(p_fullname) then
+      add_boolean_proc_body();
+    elsif is_numeric_primitive(p_fullname) then
       add_number_proc_body();
     elsif is_date_primitive(p_fullname) then
       add_date_proc_body();
@@ -521,7 +601,9 @@ create or replace package body dev_plsql_json_pk as
     l_fullname := get_fullname(p_type_info);
     add_primitive_serializer(l_fullname, p_pkg);
   
-    if is_numeric_primitive(l_fullname) then
+    if is_boolean_primitive(l_fullname) then
+      l_value_type := 'boolean';
+    elsif is_numeric_primitive(l_fullname) then
       l_value_type := 'number';
     elsif is_date_primitive(l_fullname) then
       l_value_type := 'varchar2';
@@ -581,6 +663,7 @@ create or replace package body dev_plsql_json_pk as
     add_procedures('DATE', p_pkg, p_processed_types);
     add_procedures('NUMBER', p_pkg, p_processed_types);
     add_procedures('VARCHAR2', p_pkg, p_processed_types);
+    add_procedures('PL/SQL BOOLEAN', p_pkg, p_processed_types);
   end;
 
   procedure finalize_pkg(p_pkg in out t_pkg, p_pkg_name in varchar2) is
