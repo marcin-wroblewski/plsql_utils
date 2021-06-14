@@ -375,6 +375,9 @@ create or replace package body dev_plsql_json_pk as
   
     add_str(l_procedure.bdy, l_tab_var);
     add_str(l_procedure.bdy, '  begin');
+    add_str(l_procedure.bdy, '    if p_arr is null then');
+    add_str(l_procedure.bdy, '      return l_tab;');
+    add_str(l_procedure.bdy, '    end if;');
     add_str(l_procedure.bdy, '    l_tab.extend(p_arr.get_size());');
     add_str(l_procedure.bdy, '    for i in 1 .. p_arr.get_size() loop');
   
