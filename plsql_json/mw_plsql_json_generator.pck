@@ -1,4 +1,4 @@
-create or replace package dev_plsql_json_pk as
+create or replace package mw_plsql_json_generator as
   procedure output_procedures(p_type_names in sys.odcivarchar2list,
                               p_pkg_name   in varchar2 default 'PLSQL_JSON');
 
@@ -6,7 +6,7 @@ create or replace package dev_plsql_json_pk as
                               p_pkg_name  in varchar2 default 'PLSQL_JSON');
 end;
 /
-create or replace package body dev_plsql_json_pk as
+create or replace package body mw_plsql_json_generator as
 
   --TODO: index by table
 
@@ -190,7 +190,7 @@ create or replace package body dev_plsql_json_pk as
       l_info.type_name := upper(p_type_name);
       l_info.typecode  := c_primitive_code;
     else
-      -- for now we only resolver pl/sql types; to be extended to e.g. schema collections and object types
+      -- for now we only resolve pl/sql types; to be extended to e.g. schema collections and object types
       dbms_utility.name_resolve(name          => p_type_name,
                                 context       => c_context_plsql,
                                 schema        => l_info.owner,
