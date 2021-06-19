@@ -15,15 +15,17 @@ create or replace type body mw_clob_writer is
     return;
   end;
 
-  constructor function mw_clob_writer(c in clob) return self as result is
+  constructor function mw_clob_writer(self in out mw_clob_writer,
+                                      c    in clob) return self as result is
   begin
     priv$clob := c;
     return;
   end;
 
-  overriding member procedure put_line(str varchar2) is
+  overriding member procedure put_line(self in out mw_clob_writer,
+                                       str  varchar2) is
   begin
-    dbms_lob.writeappend(priv$clob, length(str) + 1, str || chr(10));
+    dbms_lob.writeappend(self.priv$clob, length(str) + 1, str || chr(10));
   end;
 
   overriding member function get_result return anydata is

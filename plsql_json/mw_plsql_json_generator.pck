@@ -1,9 +1,12 @@
 create or replace package mw_plsql_json_generator as
-  procedure output_procedures(p_type_names in sys.odcivarchar2list,
-                              p_pkg_name   in varchar2 default 'PLSQL_JSON');
+  procedure output_pkg(p_type_names in sys.odcivarchar2list,
+                       p_pkg_name   in varchar2 default 'PLSQL_JSON');
 
-  procedure output_procedures(p_type_name in varchar2,
-                              p_pkg_name  in varchar2 default 'PLSQL_JSON');
+  procedure output_pkg(p_type_name in varchar2,
+                       p_pkg_name  in varchar2 default 'PLSQL_JSON');
+
+  procedure create_pkg(p_type_names in sys.odcivarchar2list,
+                       p_pkg_name   in varchar2 default 'PLSQL_JSON2');
 end;
 /
 create or replace package body mw_plsql_json_generator as
@@ -685,75 +688,101 @@ create or replace package body mw_plsql_json_generator as
     return l_pkg;
   end;
 
-  procedure println(p_text in varchar2) is
+  procedure println(p_writer in out mw_writer, p_text in varchar2) is
   begin
-    dbms_output.put_line(p_text);
+    p_writer.put_line(p_text);
   end;
 
-  procedure output_proc_spec(p_procedure in t_procedure) is
+  procedure output_proc_spec(p_writer    in out mw_writer,
+                             p_procedure in t_procedure) is
   begin
-    println(p_procedure.spc || ';');
+    println(p_writer, p_procedure.spc || ';');
   end;
 
-  procedure output_proc_bdy(p_procedure in t_procedure) is
+  procedure output_proc_bdy(p_writer    in out mw_writer,
+                            p_procedure in t_procedure) is
   begin
-    println(p_procedure.spc);
-    println('  is');
+    println(p_writer, p_procedure.spc);
+    println(p_writer, '  is');
     for i in 1 .. p_procedure.bdy.count() loop
-      println(p_procedure.bdy(i));
+      println(p_writer, p_procedure.bdy(i));
     end loop;
   end;
 
-  procedure output_spc(p_pkg in t_pkg) is
+  procedure output_spc(p_writer in out mw_writer, p_pkg in t_pkg) is
   begin
     for i in 1 .. p_pkg.spc_header.count() loop
-      println(p_pkg.spc_header(i));
+      println(p_writer, p_pkg.spc_header(i));
     end loop;
     for i in 1 .. p_pkg.types.count() loop
-      println('  --supported type:{' || p_pkg.types(i) || '}');
+      println(p_writer, '  --supported type:{' || p_pkg.types(i) || '}');
     end loop;
     for i in 1 .. p_pkg.serializers.count() loop
-      output_proc_spec(p_pkg.serializers(i));
+      output_proc_spec(p_writer, p_pkg.serializers(i));
     end loop;
     for i in 1 .. p_pkg.deserializers.count() loop
-      output_proc_spec(p_pkg.deserializers(i));
+      output_proc_spec(p_writer, p_pkg.deserializers(i));
     end loop;
     for i in 1 .. p_pkg.spc_footer.count() loop
-      println(p_pkg.spc_footer(i));
+      println(p_writer, p_pkg.spc_footer(i));
     end loop;
-    println('/');
   end;
 
-  procedure output_bdy(p_pkg in t_pkg) is
+  procedure output_bdy(p_writer in out mw_writer, p_pkg in t_pkg) is
   begin
     for i in 1 .. p_pkg.bdy_header.count() loop
-      println(p_pkg.bdy_header(i));
+      println(p_writer, p_pkg.bdy_header(i));
     end loop;
     for i in 1 .. p_pkg.serializers.count() loop
-      output_proc_bdy(p_pkg.serializers(i));
+      output_proc_bdy(p_writer, p_pkg.serializers(i));
     end loop;
     for i in 1 .. p_pkg.deserializers.count() loop
-      output_proc_bdy(p_pkg.deserializers(i));
+      output_proc_bdy(p_writer, p_pkg.deserializers(i));
     end loop;
     for i in 1 .. p_pkg.bdy_footer.count() loop
-      println(p_pkg.bdy_footer(i));
+      println(p_writer, p_pkg.bdy_footer(i));
     end loop;
-    println('/');
   end;
 
-  procedure output_procedures(p_type_names in sys.odcivarchar2list,
-                              p_pkg_name   in varchar2 default 'PLSQL_JSON') is
-    l_pkg t_pkg;
+  procedure output_pkg(p_type_names in sys.odcivarchar2list,
+                       p_pkg_name   in varchar2 default 'PLSQL_JSON') is
+    l_pkg    t_pkg;
+    l_writer mw_writer := mw_dbout_writer();
   begin
     l_pkg := generate_pkg(p_type_names, p_pkg_name);
-    output_spc(l_pkg);
-    output_bdy(l_pkg);
+    output_spc(l_writer, l_pkg);
+    println(l_writer, '/');
+    output_bdy(l_writer, l_pkg);
+    println(l_writer, '/');
   end;
 
-  procedure output_procedures(p_type_name in varchar2,
-                              p_pkg_name  in varchar2 default 'PLSQL_JSON') is
+  procedure output_pkg(p_type_name in varchar2,
+                       p_pkg_name  in varchar2 default 'PLSQL_JSON') is
   begin
-    output_procedures(sys.odcivarchar2list(p_type_name), p_pkg_name);
+    output_pkg(sys.odcivarchar2list(p_type_name), p_pkg_name);
+  end;
+
+  procedure create_pkg(p_type_names in sys.odcivarchar2list,
+                       p_pkg_name   in varchar2 default 'PLSQL_JSON2') is
+    l_pkg    t_pkg;
+    l_writer mw_writer;
+    l_sql_v  varchar2(32767);
+    l_sql_c  clob;
+  
+    l_cursor integer;
+    l_ignore integer;
+  begin
+    l_pkg := generate_pkg(p_type_names, p_pkg_name);
+  
+    l_writer := mw_clob_writer();
+    output_spc(l_writer, l_pkg);
+    l_sql_c := l_writer.get_result().AccessClob();
+    execute immediate l_sql_c;
+  
+    l_writer := mw_clob_writer();
+    output_bdy(l_writer, l_pkg);
+    l_sql_c := l_writer.get_result().AccessClob();
+    execute immediate l_sql_c;  
   end;
 end;
 /
