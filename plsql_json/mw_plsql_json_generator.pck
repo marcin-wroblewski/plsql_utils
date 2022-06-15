@@ -1,4 +1,9 @@
 create or replace package mw_plsql_json_generator as
+
+  procedure debug_on;
+
+  procedure debug_off;
+  
   procedure output_pkg(p_type_names in sys.odcivarchar2list,
                        p_pkg_name   in varchar2 default 'PLSQL_JSON');
 
@@ -6,7 +11,7 @@ create or replace package mw_plsql_json_generator as
                        p_pkg_name  in varchar2 default 'PLSQL_JSON');
 
   procedure create_pkg(p_type_names in sys.odcivarchar2list,
-                       p_pkg_name   in varchar2 default 'PLSQL_JSON2');
+                       p_pkg_name   in varchar2 default 'PLSQL_JSON');
 end;
 /
 create or replace package body mw_plsql_json_generator as
@@ -42,11 +47,21 @@ create or replace package body mw_plsql_json_generator as
   end;
   /
   */
+  g_debug boolean := false;
+
   c_record_code     constant all_plsql_types.typecode%type := 'PL/SQL RECORD';
   c_collection_code constant all_plsql_types.typecode%type := 'COLLECTION';
   c_primitive_code  constant all_plsql_types.typecode%type := 'PRIMITIVE';
 
+  subtype t_datatype_category is varchar2(20);
+  c_type_builtin      constant t_datatype_category := 'builtin';
+  c_type_plsql        constant t_datatype_category := 'plsql';
+  c_type_user_defined constant t_datatype_category := 'user-defined';
+
   subtype t_string is varchar2(4000);
+
+  ex_not_plsql exception;
+  pragma exception_init(ex_not_plsql, -04047);
 
   -- todo reorganize
   type t_procedure is record(
@@ -65,12 +80,74 @@ create or replace package body mw_plsql_json_generator as
     deserializers t_procedures := t_procedures());
 
   type t_type_info is record(
-    owner        all_plsql_types.owner%type,
-    package_name all_plsql_types.package_name%type,
-    type_name    all_plsql_types.type_name%type,
-    typecode     all_plsql_types.typecode%type);
+    type_category t_datatype_category,
+    owner         all_plsql_types.owner%type,
+    package_name  all_plsql_types.package_name%type,
+    type_name     all_plsql_types.type_name%type,
+    typecode      all_plsql_types.typecode%type);
 
   type t_processed_types is table of t_type_info index by t_string;
+
+  cursor cur_coll_info(p_type_info t_type_info) is
+    select t.elem_type_owner, t.elem_type_name, t.elem_type_package
+      from all_plsql_coll_types t
+     where p_type_info.type_category = c_type_plsql
+       and t.owner = p_type_info.owner
+       and t.package_name = p_type_info.package_name
+       and t.type_name = p_type_info.type_name
+    union all
+    select t.elem_type_owner, t.elem_type_name, null elem_type_package
+      from all_coll_types t
+     where p_type_info.type_category = c_type_user_defined
+       and t.owner = p_type_info.owner
+       and t.type_name = p_type_info.type_name;
+
+  cursor cur_record_info(p_type_info t_type_info) is
+    select t.attr_no,
+           t.attr_name,
+           t.attr_type_owner,
+           t.attr_type_package,
+           t.attr_type_name
+      from all_plsql_type_attrs t
+     where p_type_info.type_category = c_type_plsql
+       and t.owner = p_type_info.owner
+       and t.package_name = p_type_info.package_name
+       and t.type_name = p_type_info.type_name
+    union all
+    select t.attr_no,
+           t.attr_name,
+           t.attr_type_owner,
+           null attr_type_package,
+           t.attr_type_name
+      from all_type_attrs t
+     where p_type_info.type_category = c_type_user_defined
+       and t.owner = p_type_info.owner
+       and t.type_name = p_type_info.type_name
+     order by attr_no;
+
+  procedure debug_on is
+  begin
+    g_debug := true;
+  end;
+
+  procedure debug_off is
+  begin
+    g_debug := false;
+  end;
+
+  procedure plog(p_text in varchar2) is
+  begin
+    if g_debug then
+      dbms_output.put_line(p_text);
+    end if;
+  end;
+
+  procedure plog(p_type_info in t_type_info) is
+  begin
+    plog(p_type_info.type_category || '#' || p_type_info.owner || '#' ||
+         p_type_info.package_name || '#' || p_type_info.type_name || '#' ||
+         p_type_info.typecode);
+  end;
 
   procedure add_procedure(p_procedures in out t_procedures,
                           p_procedure  in t_procedure) is
@@ -156,32 +233,71 @@ create or replace package body mw_plsql_json_generator as
     return 'to_' || lower(p_type_info.type_name);
   end;
 
-  function get_fullname(p_owner        in varchar2,
-                        p_package_name in varchar2,
-                        p_type_name    in varchar2) return varchar2 is
+  function guess_type_category(p_owner        in varchar2,
+                               p_package_name in varchar2,
+                               p_type_name    in varchar2)
+    return t_datatype_category is
   begin
+    if p_owner is null and p_package_name is null then
+      return c_type_builtin;
+    elsif p_package_name is not null then
+      return c_type_plsql;
+    else
+      return c_type_user_defined;
+    end if;
+  end;
+
+  function get_fullname(p_type_category in t_datatype_category,
+                        p_owner         in varchar2,
+                        p_package_name  in varchar2,
+                        p_type_name     in varchar2) return varchar2 is
+    l_type_category t_datatype_category := p_type_category;
+    l_opt_owner     t_string;
+    l_opt_package   t_string;
+  begin
+    if l_type_category is null then
+      l_type_category := guess_type_category(p_owner,
+                                             p_package_name,
+                                             p_type_name);
+    end if;
     -- simply converting to lowercase names here, because it's my personal preference
     -- but it would be safer to use dbms_utility.canonicalize 
-    if p_owner is null and p_package_name is null then
+    if l_type_category = c_type_builtin then
       if lower(p_type_name) = 'pl/sql boolean' then
         return 'boolean';
       end if;
       return lower(p_type_name);
-    elsif nvl(p_owner, user) = user then
-      return lower(p_package_name || '.' || p_type_name);
     else
-      return lower(p_owner || '.' || p_package_name || '.' || p_type_name);
+      if l_type_category = c_type_plsql then
+        l_opt_package := p_package_name || '.';
+      end if;
+      if nvl(p_owner, user) <> user then
+        l_opt_owner := p_owner || '.';
+      end if;
+    
+      return lower(l_opt_owner || l_opt_package || p_type_name);
     end if;
   end;
 
   function get_fullname(p_type in t_type_info) return varchar2 is
   begin
-    return get_fullname(p_type.owner,
+    return get_fullname(p_type.type_category,
+                        p_type.owner,
                         p_type.package_name,
                         p_type.type_name);
   end;
 
-  function get_type_info(p_type_name in varchar2) return t_type_info is
+  function get_primitive_type_info(p_type_name in varchar2)
+    return t_type_info is
+    l_info t_type_info;
+  begin
+    l_info.type_category := c_type_builtin;
+    l_info.type_name     := upper(p_type_name);
+    l_info.typecode      := c_primitive_code;
+    return l_info;
+  end;
+
+  function get_plsql_type_info(p_type_name in varchar2) return t_type_info is
     l_info          t_type_info;
     l_dblink        t_string;
     l_part1_type    number;
@@ -189,29 +305,66 @@ create or replace package body mw_plsql_json_generator as
   
     c_context_plsql constant number := 1;
   begin
-    if instr(p_type_name, '.') = 0 then
-      l_info.type_name := upper(p_type_name);
-      l_info.typecode  := c_primitive_code;
-    else
-      -- for now we only resolve pl/sql types; to be extended to e.g. schema collections and object types
-      dbms_utility.name_resolve(name          => p_type_name,
-                                context       => c_context_plsql,
-                                schema        => l_info.owner,
-                                part1         => l_info.package_name,
-                                part2         => l_info.type_name,
-                                dblink        => l_dblink,
-                                part1_type    => l_part1_type,
-                                object_number => l_object_number);
-    
-      select t.typecode
-        into l_info.typecode
-        from all_plsql_types t
-       where t.owner = l_info.owner
-         and t.package_name = l_info.package_name
-         and t.type_name = l_info.type_name;
-    end if;
+    l_info.type_category := c_type_plsql;
+    -- for now we only resolve pl/sql types; to be extended to e.g. schema collections and object types
+    dbms_utility.name_resolve(name          => p_type_name,
+                              context       => c_context_plsql,
+                              schema        => l_info.owner,
+                              part1         => l_info.package_name,
+                              part2         => l_info.type_name,
+                              dblink        => l_dblink,
+                              part1_type    => l_part1_type,
+                              object_number => l_object_number);
+  
+    select t.typecode
+      into l_info.typecode
+      from all_plsql_types t
+     where t.owner = l_info.owner
+       and t.package_name = l_info.package_name
+       and t.type_name = l_info.type_name;
   
     return l_info;
+  end;
+
+  function get_sql_type_info(p_type_name in varchar2) return t_type_info is
+    l_info          t_type_info;
+    l_dblink        t_string;
+    l_part1_type    number;
+    l_part2         t_string;
+    l_object_number number;
+  
+    c_context_type constant number := 7;
+  begin
+    l_info.type_category := c_type_user_defined;
+    dbms_utility.name_resolve(name          => p_type_name,
+                              context       => c_context_type,
+                              schema        => l_info.owner,
+                              part1         => l_info.type_name,
+                              part2         => l_part2,
+                              dblink        => l_dblink,
+                              part1_type    => l_part1_type,
+                              object_number => l_object_number);
+  
+    select t.typecode
+      into l_info.typecode
+      from all_types t
+     where t.owner = l_info.owner
+       and t.type_name = l_info.type_name;
+  
+    return l_info;
+  end;
+
+  function get_type_info(p_type_name in varchar2) return t_type_info is
+  begin
+    --dbms_output.put_line('type name = ' || p_type_name);
+    if instr(p_type_name, '.') = 0 then
+      return get_primitive_type_info(p_type_name);
+    else
+      return get_plsql_type_info(p_type_name);
+    end if;
+  exception
+    when ex_not_plsql then
+      return get_sql_type_info(p_type_name);
   end;
 
   procedure add_record_serializer(p_fullname in varchar2,
@@ -325,18 +478,23 @@ create or replace package body mw_plsql_json_generator as
     l_field_types sys.odcivarchar2list := sys.odcivarchar2list();
   
     l_record_type t_string;
+    type t_record_info_tab is table of cur_record_info%rowtype;
+    l_record_info_tab t_record_info_tab;
+    l_rec_info        cur_record_info%rowtype;
   begin
-    for r in (select t.*
-                from all_plsql_type_attrs t
-               where t.owner = p_type_info.owner
-                 and t.package_name = p_type_info.package_name
-                 and t.type_name = p_type_info.type_name
-               order by t.attr_no) loop
-      l_field_type := get_fullname(r.attr_type_owner,
-                                   r.attr_type_package,
-                                   r.attr_type_name);
+    open cur_record_info(p_type_info);
+    fetch cur_record_info bulk collect
+      into l_record_info_tab;
+    close cur_record_info;
+  
+    for i in 1 .. l_record_info_tab.count() loop
+      l_rec_info   := l_record_info_tab(i);
+      l_field_type := get_fullname(null,
+                                   l_rec_info.attr_type_owner,
+                                   l_rec_info.attr_type_package,
+                                   l_rec_info.attr_type_name);
       add_procedures(l_field_type, p_pkg, p_processed_types);
-      add_str(l_fields, lower(r.attr_name));
+      add_str(l_fields, lower(l_rec_info.attr_name));
       add_str(l_field_types, l_field_type);
     end loop;
   
@@ -459,7 +617,7 @@ create or replace package body mw_plsql_json_generator as
   procedure add_coll_type_proc(p_type_info       in t_type_info,
                                p_pkg             in out t_pkg,
                                p_processed_types in out t_processed_types) is
-    l_coll_info all_plsql_coll_types%rowtype;
+    l_coll_info cur_coll_info%rowtype;
     l_elem_type t_string;
     c_hdr constant t_string := '  function js(p_val in <<collection_type>>) return json_array_t';
     l_hdr       t_string;
@@ -467,17 +625,17 @@ create or replace package body mw_plsql_json_generator as
   
     l_deserializer_name t_string;
   begin
-    select t.*
-      into l_coll_info
-      from all_plsql_coll_types t
-     where t.owner = p_type_info.owner
-       and t.package_name = p_type_info.package_name
-       and t.type_name = p_type_info.type_name;
     l_coll_type := get_fullname(p_type_info);
+    open cur_coll_info(p_type_info);
+    fetch cur_coll_info
+      into l_coll_info;
+    close cur_coll_info;
   
-    l_elem_type := get_fullname(l_coll_info.elem_type_owner,
+    l_elem_type := get_fullname(null,
+                                l_coll_info.elem_type_owner,
                                 l_coll_info.elem_type_package,
                                 l_coll_info.elem_type_name);
+  
     add_procedures(l_elem_type, p_pkg, p_processed_types);
   
     add_collection_serializer(l_coll_type, p_pkg);
@@ -628,6 +786,7 @@ create or replace package body mw_plsql_json_generator as
     l_type_info t_type_info := get_type_info(p_type_name);
     l_fullname  t_string;
   begin
+    plog(l_type_info);
     l_fullname := get_fullname(l_type_info);
     if p_processed_types.exists(l_fullname) then
       return;
@@ -662,11 +821,11 @@ create or replace package body mw_plsql_json_generator as
     add_str(p_pkg.bdy_header,
             '  g_date_format varchar2(30) := ''yyyy-mm-dd"T"hh24:mi:ss'';');
   
-    add_procedures('TIMESTAMP', p_pkg, p_processed_types);
-    add_procedures('DATE', p_pkg, p_processed_types);
-    add_procedures('NUMBER', p_pkg, p_processed_types);
-    add_procedures('VARCHAR2', p_pkg, p_processed_types);
-    add_procedures('PL/SQL BOOLEAN', p_pkg, p_processed_types);
+    add_procedures('timestamp', p_pkg, p_processed_types);
+    add_procedures('date', p_pkg, p_processed_types);
+    add_procedures('number', p_pkg, p_processed_types);
+    add_procedures('varchar2', p_pkg, p_processed_types);
+    add_procedures('pl/sql boolean', p_pkg, p_processed_types);
   end;
 
   procedure finalize_pkg(p_pkg in out t_pkg, p_pkg_name in varchar2) is
@@ -763,7 +922,7 @@ create or replace package body mw_plsql_json_generator as
   end;
 
   procedure create_pkg(p_type_names in sys.odcivarchar2list,
-                       p_pkg_name   in varchar2 default 'PLSQL_JSON2') is
+                       p_pkg_name   in varchar2 default 'PLSQL_JSON') is
     l_pkg    t_pkg;
     l_writer mw_writer;
     l_sql_v  varchar2(32767);
@@ -782,7 +941,7 @@ create or replace package body mw_plsql_json_generator as
     l_writer := mw_clob_writer();
     output_bdy(l_writer, l_pkg);
     l_sql_c := l_writer.get_result().AccessClob();
-    execute immediate l_sql_c;  
+    execute immediate l_sql_c;
   end;
 end;
 /
